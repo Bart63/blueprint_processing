@@ -120,16 +120,18 @@ def get_furnitures(blueprint_img, settings):
     angle_precision = settings['angle_precision']
     scale_max, scale_min = settings['scale_max'], settings['scale_min']
     scale_precision = settings['scale_precision']
-    threshold = settings['threshold']
+    threshold_val = settings['threshold']
     max_instances_detect = settings['max_instances_detect']
     
     scale_max_marg = scale_max+scale_precision*0.1
-    
+
+    blueprint_img = threshold(blueprint_img, 128, 255, THRESH_BINARY | THRESH_OTSU)[1]
     detected_furnitures = {}
     for furniture_fname in templates_files:
-        furniture_img = read(furniture_fname)
+        furniture_img = threshold(read(furniture_fname), 128, 255, THRESH_BINARY | THRESH_OTSU)[1]
         detected_furnitures[furniture_fname] = {}
 
+        furniture_rects_all = []
         for angl in range(0, 360, angle_precision):
             cur_fur_rot = rotate_scale(furniture_img, angl)
             detected_furnitures[furniture_fname][angl] = {'score':0, 'scale':0, 'rectangles':[]}
@@ -141,11 +143,11 @@ def get_furnitures(blueprint_img, settings):
                 _, max_val, _, _ = minMaxLoc(result)
 
                 max_det_score = detected_furnitures[furniture_fname][angl]['score']
-                if max_val <= max_det_score or max_val <= threshold:
+                if max_val <= max_det_score or max_val <= threshold_val:
                     scl += scale_precision
                     continue
 
-                yloc, xloc = where(result >= threshold)
+                yloc, xloc = where(result >= threshold_val)
                 if len(yloc) > max_instances_detect:
                     scl += scale_precision
                     continue
@@ -154,13 +156,28 @@ def get_furnitures(blueprint_img, settings):
                 for (x, y) in zip(xloc, yloc):
                     rectangles.append([int(x), int(y), int(cur_fur.shape[1]), int(cur_fur.shape[0])])
                     rectangles.append([int(x), int(y), int(cur_fur.shape[1]), int(cur_fur.shape[0])])
-                rectangles, weights = groupRectangles(rectangles, 1, 0.2)
+                rectangles, _ = groupRectangles(rectangles, 1, 0.2)
 
-                max_det_score = detected_furnitures[furniture_fname][angl]['score'] = max_val
-                max_det_score = detected_furnitures[furniture_fname][angl]['scale'] = scl
-                max_det_score = detected_furnitures[furniture_fname][angl]['rectangles'] = rectangles
+                good_rects = []
+                
+                for r1 in rectangles:
+                    polygon1 = Polygon([[r1[0], r1[1]], [r1[0], r1[1]+r1[3]], [r1[0]+r1[2], r1[1]+r1[3]], [r1[0]+r1[2], r1[1]]])
+                    
+                    rects_all = furniture_rects_all + good_rects 
+                    for r2 in rects_all:
+                        polygon2 = Polygon([[r2[0], r2[1]], [r2[0], r2[1]+r2[3]], [r2[0]+r2[2], r2[1]+r2[3]], [r2[0]+r2[2], r2[1]]])
+                        scr = 2*polygon1.intersection(polygon2).area / (polygon1.area+polygon2.area)
+                        if scr > settings['max_overlap_perc']:
+                            break
+                    else:
+                        good_rects.append(r1)
+
+                detected_furnitures[furniture_fname][angl]['score'] = max_val
+                detected_furnitures[furniture_fname][angl]['scale'] = scl
+                detected_furnitures[furniture_fname][angl]['rectangles'] = good_rects
 
                 scl += scale_precision
+            furniture_rects_all.extend(detected_furnitures[furniture_fname][angl]['rectangles'])
             if len(detected_furnitures[furniture_fname][angl]['rectangles']) == 0:
                 detected_furnitures[furniture_fname].pop(angl, None)
         if not detected_furnitures[furniture_fname]:
@@ -301,6 +318,8 @@ def correct_lines(poly):
     acted = True
     poly2 = poly
     while acted:
+        if len(poly) == 0:
+            return []
         acted = False
         next1 = list(poly2[1:])
         next1.append(poly2[0])
@@ -361,6 +380,8 @@ def get_polygons(img, settings):
 
         corrected_full = correct_triangularities(corrected)
         corrected_full = correct_lines(corrected_full)
+        if len(corrected_full) == 0:
+            continue
         selected_polygons.append(corrected_full)
 
         drawContours(debug_img1,[cnt],0,(0,0,255),2)
@@ -626,11 +647,12 @@ def save_detection(blueprint_path, blueprint_img, entrance, furnitures, rect_dic
                     rec_center = get_center_pt(r)
                     fur_center = get_middle_rel_pt(rec_center, entrance_xy, px_to_meters)
                     centers.append({fur_id: rec_center})
-                    f.write(f'{fur_id};{furniture_fname};{round(fur_center[0], 4)};{round(fur_center[1], 4)};{angle};\n')
+                    f.write(f'{fur_id};{furniture_fname};{round(fur_center[0], 5)};{round(fur_center[1], 5)};{angle};{round(detect_dir["scale"], 5)};{round(detect_dir["score"],5)}\n')
                     fur_id += 1
         for rect_dict in rect_dicts_list:
             rec_center = get_middle_rel_pt((rect_dict["x_mid"], rect_dict["y_mid"]), entrance_xy, px_to_meters)
-            f.write(f'{fur_id};{"sciana"};{round(rec_center[0], 2)};{round(rec_center[1], 2)};{rect_dict["width"]};{rect_dict["height"]};\n')
+            wid, hei = rect_dict["width"]*px_to_meters, rect_dict["height"]*px_to_meters
+            f.write(f'{fur_id};{"sciana"};{round(rec_center[0], 5)};{round(rec_center[1], 5)};{round(wid, 5)};{round(hei, 5)};\n')
             fur_id += 1
     write_debug_info(blueprint_path, blueprint_img, entrance, furnitures, centers, debug_imgs)
 
@@ -662,6 +684,7 @@ def main():
         print('Szukam punktu początkowego...')
         entrance = get_entrance(current_blueprint, settings['entrance_detection'])
         print('Znalazłem!')
+        print(f'Najlepsza skala: {entrance["scale"]}')
         print('Szukam mebli...')
         furnitures = get_furnitures(current_blueprint, settings['furniture_detection'])
         print('Znalazłem!')
